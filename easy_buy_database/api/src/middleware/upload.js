@@ -20,6 +20,21 @@ const storage = multer.diskStorage({
     }
 });
 
+// For general upload (existing)
 const upload = multer({ storage });
 
+// For image upload with filter and size limit
+const imageUpload = multer({
+    storage,
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (!allowedTypes.includes(file.mimetype)) {
+            return cb(new Error('Only JPG, PNG, GIF, WEBP allowed!'));
+        }
+        cb(null, true);
+    },
+    limits: { fileSize: 2 * 1024 * 1024 } // 2MB max
+});
+
 module.exports = upload;
+module.exports.imageUpload = imageUpload;
