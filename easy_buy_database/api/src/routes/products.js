@@ -4,6 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 const { getPool } = require('../utils/db');
 const upload = require('../middleware/upload');
 const path = require('path');
+const fs = require('fs');
 
 const router = express.Router();
 
@@ -134,12 +135,19 @@ router.delete('/:id', requireAuth, async (req, res) => {
 /**
  * @route   POST /api/products/:id/images
  * @desc    Upload product images (requires auth, seller)
+ * @access  Private (JWT)
  */
-router.post('/:id/images', requireAuth, upload.array('images', 5), async (req, res) => {
+const allowedTypes = ['image/jpeg', 'image/png'];
+const MAX_FILES = 5;
+const MAX_SIZE = 2 * 1024 * 1024;
+// Use imageUpload from upload module (compatible export)
+const imageUpload = upload.imageUpload;
+
+router.post('/:id/images', requireAuth, imageUpload.array('images', MAX_FILES), async (req, res) => {
     const productId = req.params.id;
     try {
         const pool = getPool();
-        // Only seller can upload images
+        // Only seller can upload images to own product
         const [products] = await pool.query(
             "SELECT seller_id FROM products WHERE id = ?",
             [productId]
@@ -151,16 +159,77 @@ router.post('/:id/images', requireAuth, upload.array('images', 5), async (req, r
         if (!req.files || !req.files.length)
             return res.status(400).json({ error: 'No files uploaded' });
 
-        // Add image records (relative URLs, not full path)
+        // Security check each file after multer handling (should be redundant, double check)
+        const savedFiles = [];
         for (const file of req.files) {
+            if (!allowedTypes.includes(file.mimetype)) {
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+                continue;
+            }
+            if (file.size > MAX_SIZE) {
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+                continue;
+            }
+            // Success path: add to DB
             await pool.query(
                 "INSERT INTO product_images (product_id, image_url) VALUES (?, ?)",
                 [productId, `/uploads/${file.filename}`]
             );
+            savedFiles.push(`/uploads/${file.filename}`);
         }
-        res.status(201).json({ message: 'Images uploaded', files: req.files.map(f => `/uploads/${f.filename}`) });
+        if (!savedFiles.length) {
+            return res.status(400).json({ error: 'No valid images uploaded' });
+        }
+
+        res.status(201).json({ message: 'Images uploaded', files: savedFiles });
     } catch (err) {
+        if (req.files) {
+            req.files.forEach((file) => {
+                if (file && file.path && fs.existsSync(file.path)) {
+                    fs.unlinkSync(file.path);
+                }
+            });
+        }
         res.status(500).json({ error: 'Failed to upload images' });
+    }
+});
+
+/**
+ * @route   GET /api/products/:productId/images/:imageId
+ * @desc    Serve a product image by imageId
+ * @access  Public (for product display)
+ */
+router.get('/:productId/images/:imageId', async (req, res) => {
+    const { productId, imageId } = req.params;
+    try {
+        const pool = getPool();
+        const [rows] = await pool.query(
+            "SELECT image_url FROM product_images WHERE id=? AND product_id=?",
+            [imageId, productId]
+        );
+        if (!rows.length) return res.status(404).json({ error: 'Image not found' });
+        const relPath = rows[0].image_url.startsWith('/uploads/')
+            ? rows[0].image_url.replace(/^\\/uploads\\//, '')
+            : null;
+        if (!relPath) return res.status(404).json({ error: 'Image not found' });
+
+        // Only allow jpeg/png
+        const ext = relPath.split('.').pop()?.toLowerCase();
+        if (!['jpg', 'jpeg', 'png'].includes(ext)) {
+            return res.status(403).json({ error: 'Unsupported image type.' });
+        }
+        const absPath = path.join(__dirname, '..', '..', 'uploads', relPath);
+        if (!fs.existsSync(absPath)) {
+            return res.status(404).json({ error: 'File missing from server.' });
+        }
+        res.sendFile(absPath, {
+            headers: {
+                'Content-Type': ext === 'png' ? 'image/png' : 'image/jpeg',
+                'Cache-Control': 'public, max-age=86400'
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to serve image' });
     }
 });
 
